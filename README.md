@@ -120,17 +120,32 @@ OPENAI_BASE_URL=https://api.openai.com/v1
 ELEVENLABS_API_KEY=
 ELEVENLABS_VOICE_ID=
 ELEVENLABS_BASE_URL=https://api.elevenlabs.io/v1
+ELEVENLABS_MODEL_ID=eleven_multilingual_v2
+ELEVENLABS_OUTPUT_FORMAT=mp3_44100_128
 
-BACH_API_KEY=
-BACH_BASE_URL=
-BACH_VIDEO_PATH=/v1/generate/video
-BACH_IMAGE_PATH=/v1/generate/image
+BACH_ACCESS_KEY=
+BACH_SECRET_KEY=
+BACH_BASE_URL=https://api-gen-na.bach.art/api/vdr
+BACH_TEXT_TO_VIDEO_PATH=/videos/text2video
+BACH_ELEMENTS_TO_VIDEO_PATH=/videos/elements2video
+BACH_TEXT_TO_IMAGE_PATH=/images/text2image
+BACH_TEXT_TO_SUBJECT_PATH=/subject/text2image
+BACH_MODEL_NAME=bach-1.0-preview
+BACH_RESOLUTION=1080p
+BACH_POLL_INTERVAL_SECONDS=10
 
 REQUEST_TIMEOUT_SECONDS=120
 REMOTION_CONCURRENCY=2
+
+# Optional cost-estimation snapshot; enter the rates in your provider contracts.
+OPENAI_INPUT_USD_PER_MILLION=0
+OPENAI_OUTPUT_USD_PER_MILLION=0
+ELEVENLABS_USD_PER_THOUSAND_CHARS=0
+BACH_VIDEO_USD_PER_CALL=0
+BACH_IMAGE_USD_PER_CALL=0
 ```
 
-`BACH_VIDEO_PATH` and `BACH_IMAGE_PATH` are configurable because BACH deployments may expose different routes. The adapter expects a JSON response and records the provider response in `assets.json`. Confirm the paths and response contract with the target BACH deployment before a production run.
+The BACH adapter signs an HS256 JWT server-side from `BACH_ACCESS_KEY` and `BACH_SECRET_KEY`. It follows the official asynchronous envelope (`data.task_id`, then `GET <same-endpoint>/{task_id}`). Repeated subjects are generated once through Text-to-Subject and reused through Elements-to-Video; ordinary B-roll uses Text-to-Video. Failed video falls back to Text-to-Image plus Remotion camera motion, then deterministic graphics. Keep the SecretKey out of the browser and repository.
 
 ## Deterministic mode
 
@@ -187,8 +202,8 @@ Production mode requires all of the following before it starts billable work:
 
 - `OPENAI_API_KEY`: generates canonical facts and the planning bundle through the Responses API.
 - `OPENAI_MODEL`: defaults to `gpt-5-mini`; pin a model/snapshot according to the deployment's quality and reproducibility policy.
-- `ELEVENLABS_API_KEY` and `ELEVENLABS_VOICE_ID`: generate multilingual speech and character alignment.
-- `BACH_API_KEY`, `BACH_BASE_URL`, `BACH_VIDEO_PATH`, and `BACH_IMAGE_PATH`: generate B-roll video or image assets.
+- `ELEVENLABS_API_KEY` and `ELEVENLABS_VOICE_ID`: authenticate TTS and select an accessible voice. `ELEVENLABS_MODEL_ID` defaults to the Chinese-capable, long-form `eleven_multilingual_v2`; `ELEVENLABS_OUTPUT_FORMAT` defaults to `mp3_44100_128` and is sent as the official query parameter.
+- `BACH_ACCESS_KEY` and `BACH_SECRET_KEY`: sign BACH bearer tokens; the documented base URL and endpoint paths have working defaults.
 - One or more readable local PDF paths in `source_materials.financial_reports`.
 - A non-empty disclaimer in `source_materials.disclaimer`.
 
@@ -243,7 +258,7 @@ Production execution is:
 
 1. Parse each local PDF with PyMuPDF and preserve page-level text.
 2. Call OpenAI once for canonical facts, financial analysis, story plan, scene plan, narration, and chart spec.
-3. Preserve Story Plan, Narration, and Chart Spec review artifacts.
+3. Pause after Story Plan, Narration, and Chart Spec; persist each decision and resume from the approved checkpoint without repeating the OpenAI planning call.
 4. Call ElevenLabs for Chinese speech and character timestamps.
 5. For every scene, try BACH video; on failure try BACH image plus Remotion camera motion; on another failure use built-in graphics.
 6. Compile the animation timeline and render manifest.
@@ -260,7 +275,7 @@ source .venv/bin/activate
 uvicorn app.main:app --reload --port 8000
 ```
 
-Open `http://127.0.0.1:8000`. Restart the service after changing `.env`. The current UI is intentionally minimal and submits JSON job inputs; the production CLI is the clearest path for supplying local report paths.
+Open `http://127.0.0.1:8000`. Restart the service after changing `.env`. The local UI uploads a PDF, creates an idempotent job, exposes each review gate, permits a completed Scene to be retried, and displays the final MP4. Keep the service bound to localhost because this take-home implementation does not include user authentication.
 
 ## Project structure and organization
 
@@ -379,8 +394,8 @@ Mode selection is strict. Production failures do not reuse deterministic facts, 
 - `POST /api/jobs`: create a job; supports `Idempotency-Key`.
 - `GET /api/jobs/{id}`: inspect job and node state.
 - `GET /api/jobs/{id}/artifacts/{name}`: download an artifact.
-- `POST /api/jobs/{id}/reviews/{node}/approve|reject`: persist a review decision.
-- `POST /api/jobs/{id}/scenes/{scene_id}/retry`: invalidate only scene-level downstream work.
+- `POST /api/jobs/{id}/reviews/{node}/approve|reject`: persist a decision; approval resumes from the next durable checkpoint.
+- `POST /api/jobs/{id}/scenes/{scene_id}/retry`: regenerate that Scene's assets and rebuild its shared downstream timeline, manifest, render, and QA while preserving facts and plans.
 - `GET /api/jobs/{id}/events`: read newline-delimited structured events.
 
 States are `queued`, `running`, `waiting_review`, `rendering`, `qa`, `completed`, `failed`, `cancelled`, and `blocked_conflict`.
@@ -399,7 +414,9 @@ pytest -q
 npx tsc --noEmit
 ```
 
-Automated QA checks fact references, transition templates, timeline bounds, subtitle safe regions, disclaimer presence/duration, and video existence. A production approval process should additionally inspect the keyframes listed in `qa_report.json` and independently verify financial facts.
+Automated QA checks fact references, transition templates, timeline bounds, subtitle safe regions, non-empty captions, narration audio, disclaimer presence/duration, and a non-empty video. A production approval process should additionally inspect the keyframe times listed in `qa_report.json` and independently verify financial facts.
+
+The repository test suite uses mocked/local boundaries and therefore incurs no provider cost. A final live production smoke test still requires operator-owned OpenAI, ElevenLabs, and BACH credentials in the local uncommitted `.env`. Never paste credentials into job JSON, logs, chat, or source control. BACH deployments differ; confirm their submit/status/result contract and pricing variables before that run.
 
 ## Evaluation Metrics
 
@@ -441,7 +458,7 @@ Automated QA checks fact references, transition templates, timeline bounds, subt
 - BACH produces reusable visual references and scene assets through configurable routes.
 - React, Remotion, ECharts, and SVG provide deterministic rendering.
 
-Recommended next steps include SEC/XBRL cross-validation, a resumable queue such as Temporal, a real review/resume UI, BACH deployment-specific polling/download contracts, renderer support for arbitrary production chart types, Postgres/Redis state, object storage, OpenTelemetry, and automated visual-regression evaluation.
+Recommended next steps include SEC/XBRL cross-validation, a durable queue such as Temporal, provider webhooks, Postgres/Redis state, object storage, authentication, OpenTelemetry, and automated visual-regression evaluation. The local state machine is resumable, but the in-process FastAPI background worker is not a substitute for a durable distributed queue.
 
 ## Disclaimer
 

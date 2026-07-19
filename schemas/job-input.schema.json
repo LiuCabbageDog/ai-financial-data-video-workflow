@@ -1,36 +1,58 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "job-input.schema.json",
+  "title": "AI Financial Video Job Input",
   "type": "object",
+  "additionalProperties": false,
   "required": ["source_materials"],
   "properties": {
     "source_materials": {
-      "type": "object",
+      "type": "object", "additionalProperties": false,
       "required": ["financial_reports", "disclaimer"],
       "properties": {
-        "financial_reports": {"type": "array", "minItems": 1, "items": {"type": "string"}},
-        "earnings_transcript": {"type": ["string", "null"], "default": null, "description": "Reserved for a future earnings-call source document; currently not consumed by the workflow."},
+        "financial_reports": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+        "earnings_transcript": {"type": ["string", "null"], "default": null},
         "supplementary_files": {"type": "array", "items": {"type": "string"}, "default": []},
         "disclaimer": {"type": "string", "minLength": 1}
       }
     },
-    "content_requirements": {"type": ["object", "null"]},
-    "transcript": {
-      "type": "object",
-      "default": {"mode": "generate", "text": null, "allow_editing": true, "language": "zh-CN"},
-      "required": ["mode", "language"],
+    "content_requirements": {
+      "type": ["object", "null"], "additionalProperties": false,
       "properties": {
-        "mode": {"enum": ["generate", "pre-written"]},
-        "text": {"type": ["string", "null"]},
-        "allow_editing": {"type": "boolean", "default": true},
-        "language": {"type": "string", "default": "zh-CN"}
+        "topic": {"type": "string"}, "objective": {"type": "string"},
+        "required_metrics": {"type": "array", "items": {"type": "string"}},
+        "target_duration_seconds": {"type": "integer", "minimum": 15, "maximum": 600}
+      }
+    },
+    "transcript": {
+      "type": "object", "additionalProperties": false,
+      "default": {"mode": "generate", "text": null, "allow_editing": true, "language": "zh-CN"},
+      "properties": {
+        "mode": {"enum": ["generate", "pre-written"]}, "text": {"type": ["string", "null"]},
+        "allow_editing": {"type": "boolean"}, "language": {"type": "string"}
       },
       "allOf": [{"if": {"properties": {"mode": {"const": "pre-written"}}}, "then": {"required": ["text"], "properties": {"text": {"type": "string", "minLength": 1}}}}]
     },
-    "creative_direction": {"type": "object"},
-    "audio": {"type": "object"},
-    "captions": {"type": "object"},
-    "brand": {"type": "object"},
-    "output": {"type": "object"}
-  }
+    "creative_direction": {
+      "type": "object", "additionalProperties": false,
+      "properties": {"audience":{"type":"string"},"tone":{"type":"string"},"visual_style":{"type":"string"},"pacing":{"type":"string"},"chart_style":{"type":"string"},"motion_style":{"type":"string"}}
+    },
+    "audio": {
+      "type": "object", "additionalProperties": false,
+      "properties": {"provider":{"type":"string"},"voice_id":{"type":["string","null"]},"speaking_rate":{"type":"number","minimum":0.5,"maximum":2},"background_music":{"type":"boolean"},"language":{"type":"string"}}
+    },
+    "captions": {
+      "type": "object", "additionalProperties": false,
+      "properties": {"enabled":{"type":"boolean"},"mode":{"const":"burned_in"},"language":{"type":"string"},"position":{"const":"bottom"},"max_lines":{"type":"integer","minimum":1,"maximum":3},"highlight_keywords":{"type":"boolean"}}
+    },
+    "brand": {
+      "type": "object", "additionalProperties": false,
+      "properties": {"logo":{"type":["string","null"]},"primary_color":{"type":"string","pattern":"^#[0-9A-Fa-f]{6}$"},"font_family":{"type":"string"}}
+    },
+    "output": {
+      "type": "object", "additionalProperties": false,
+      "properties": {"aspect_ratio":{"enum":["16:9","9:16","1:1"]},"resolution":{"enum":["1920x1080","1080x1920","1080x1080"]},"fps":{"enum":[24,25,30,60]},"format":{"const":"mp4"}}
+    }
+  },
+  "allOf": [{"if": {"properties": {"transcript": {"properties": {"mode": {"const": "generate"}}}}}, "then": {"required": ["content_requirements"], "properties": {"content_requirements": {"type": "object", "required": ["topic", "target_duration_seconds"]}}}}]
 }
