@@ -1,6 +1,7 @@
 {
   "name": "financial-video-workflow",
   "version": "1.0.0",
+  "packageManager": "pnpm@11.9.0",
   "private": true,
   "scripts": {
     "render": "remotion render remotion/index.ts FinancialVideo",

@@ -40,7 +40,7 @@ flowchart TD
 |---|---:|---|---|
 | Python | 3.11+ recommended | API, PDF parsing, workflow, tests | System/package-manager location; project packages are isolated in `<project-folder>/.venv/` |
 | Node.js | 20+ | Remotion, React, TypeScript | System/package-manager location |
-| npm | Version bundled with Node.js | Installs JavaScript packages | System/package-manager location; packages go to `<project-folder>/node_modules/` |
+| pnpm | 11.9.0 | Installs JavaScript packages | Enabled through Corepack or installed separately; packages go to `<project-folder>/node_modules/` |
 | Git | Current stable | Source control | System/package-manager location |
 | Chrome Headless Shell | Managed by Remotion | Programmatic rendering | Downloaded automatically by Remotion on the first render |
 | `say` and `afconvert` | Built into macOS | Deterministic Chinese TTS and WAV conversion | `/usr/bin/say` and `/usr/bin/afconvert` |
@@ -80,7 +80,8 @@ python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -r requirements.txt
 
-npm install
+corepack enable
+pnpm install --frozen-lockfile
 cp .env.example .env
 ```
 
