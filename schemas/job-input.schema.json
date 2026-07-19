@@ -2,14 +2,14 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "job-input.schema.json",
   "type": "object",
-  "required": ["source_materials", "transcript"],
+  "required": ["source_materials"],
   "properties": {
     "source_materials": {
       "type": "object",
       "required": ["financial_reports", "disclaimer"],
       "properties": {
         "financial_reports": {"type": "array", "minItems": 1, "items": {"type": "string"}},
-        "earnings_transcript": {"type": ["string", "null"]},
+        "earnings_transcript": {"type": ["string", "null"], "default": null, "description": "Reserved for a future earnings-call source document; currently not consumed by the workflow."},
         "supplementary_files": {"type": "array", "items": {"type": "string"}, "default": []},
         "disclaimer": {"type": "string", "minLength": 1}
       }
@@ -17,6 +17,7 @@
     "content_requirements": {"type": ["object", "null"]},
     "transcript": {
       "type": "object",
+      "default": {"mode": "generate", "text": null, "allow_editing": true, "language": "zh-CN"},
       "required": ["mode", "language"],
       "properties": {
         "mode": {"enum": ["generate", "pre-written"]},

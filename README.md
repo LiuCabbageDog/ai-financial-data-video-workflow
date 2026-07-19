@@ -198,6 +198,8 @@ Production provider requests may incur cost. The workflow validates all required
 
 Copy the example input and replace the report entry with a real local PDF path. Relative paths are resolved from the current working directory; absolute paths are safer for unattended runs.
 
+The top-level `transcript` object may be omitted to generate narration with the default `zh-CN` settings. Use `mode: "pre-written"` with non-empty `text` to supply the narration. Set `allow_editing` to `false` to preserve that text, or `true` to allow production planning to edit it for clarity, timing, and scene segmentation. `source_materials.earnings_transcript` is reserved for a future earnings-call source input and is currently not consumed; keep it as `null` or omit it.
+
 ```json
 {
   "source_materials": {

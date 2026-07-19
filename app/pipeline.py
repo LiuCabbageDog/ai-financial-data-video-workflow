@@ -71,7 +71,7 @@ class Pipeline:
             analysis=bundle["financial_analysis"] if bundle else self._analysis(facts); self._node("financial_analysis",analysis)
             story=bundle["story_plan"] if bundle else self._story(); self._reviewable("story_plan",story)
             scenes=bundle["scene_plan"] if bundle else self._scenes(); self._node("scene_plan",scenes)
-            narration=bundle["narration"] if bundle else self._narration(scenes); self._reviewable("narration",narration)
+            narration=self._resolve_narration(scenes,bundle); self._reviewable("narration",narration)
             charts=bundle["chart_spec"] if bundle else self._charts(); self._reviewable("chart_spec",charts)
             if self.settings.mode == "production":
                 spoken="。".join(x["spoken_text"] for x in narration["segments"]); public=ROOT/"public"; public.mkdir(exist_ok=True); audio_name=f"{self.job_id}-narration.mp3"
@@ -128,7 +128,38 @@ class Pipeline:
     def _narration(self,scenes:dict[str,Any])->dict[str,Any]:
         """Generate separate display and normalized spoken text for each scene."""
         texts=["英伟达最新成绩单来了：AI 热潮，究竟有多强？","Q1 FY2027 收入 $81.6B，同比 +85%，环比 +20%，增长曲线再次变陡。","Data Center 收入 $75.2B，同比 +92%，约占总收入九成二，是最核心的增长引擎。","GAAP 毛利率 74.9%。公司给出的 Q2 FY2027 收入指引是 $91.0B，±2%。","但高增长不等于低风险。本视频仅供信息与产品演示用途，不构成投资建议。"]
-        return {"language":"zh-CN","segments":[{"scene_id":s["id"],"display_text":t,"spoken_text":normalize_spoken(t),"fact_ids":ids} for s,t,ids in zip(scenes["scenes"],texts,[[],["fact.revenue.q1fy27"],["fact.datacenter.q1fy27","fact.revenue.q1fy27"],["fact.grossmargin.q1fy27","fact.guidance.q2fy27"],[]])]}
+        return {"language":"zh-CN","source":"generated","segments":[{"scene_id":s["id"],"display_text":t,"spoken_text":normalize_spoken(t),"fact_ids":ids} for s,t,ids in zip(scenes["scenes"],texts,[[],["fact.revenue.q1fy27"],["fact.datacenter.q1fy27","fact.revenue.q1fy27"],["fact.grossmargin.q1fy27","fact.guidance.q2fy27"],[]])]}
+
+    def _resolve_narration(self,scenes:dict[str,Any],bundle:dict[str,Any]|None)->dict[str,Any]:
+        """Honor transcript mode instead of always replacing a supplied script."""
+        transcript=self.request.transcript
+        if transcript.mode == "generate":
+            narration=bundle["narration"] if bundle else self._narration(scenes)
+            narration.setdefault("source","generated")
+            return narration
+        if transcript.allow_editing and bundle:
+            narration=bundle["narration"]
+            narration["source"]="pre-written"
+            narration["editing_applied"]=True
+            return narration
+        return self._pre_written_narration(scenes)
+
+    def _pre_written_narration(self,scenes:dict[str,Any])->dict[str,Any]:
+        """Segment a locked user script without rewriting it and add the required disclaimer scene."""
+        text=self.request.transcript.text or ""
+        sentences=[part for part in re.split(r"(?<=[。！？!?])",text) if part]
+        scene_list=scenes["scenes"]
+        content_scenes=[scene for scene in scene_list if scene.get("purpose")!="disclaimer"]
+        segments=[]
+        for index,scene in enumerate(content_scenes):
+            start=index*len(sentences)//max(1,len(content_scenes)); end=(index+1)*len(sentences)//max(1,len(content_scenes))
+            display="".join(sentences[start:end])
+            segments.append({"scene_id":scene["id"],"display_text":display,"spoken_text":normalize_spoken(display),"fact_ids":[]})
+        for scene in scene_list:
+            if scene.get("purpose")=="disclaimer":
+                display=str(self.request.source_materials.get("disclaimer","")).strip()
+                segments.append({"scene_id":scene["id"],"display_text":display,"spoken_text":normalize_spoken(display),"fact_ids":[]})
+        return {"language":self.request.transcript.language,"source":"pre-written","editing_applied":False,"segments":segments}
 
     def _charts(self)->dict[str,Any]:
         """Declare chart data, animations, labels and subtitle-safe regions."""

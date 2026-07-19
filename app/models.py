@@ -38,7 +38,7 @@ class JobInput(BaseModel):
     """Normalized input envelope; omitted groups receive safe defaults."""
     source_materials: dict[str, Any]
     content_requirements: dict[str, Any] | None = None
-    transcript: Transcript
+    transcript: Transcript = Field(default_factory=Transcript)
     creative_direction: dict[str, Any] = Field(default_factory=lambda: {"audience":"retail investors","visual_style":"cartoon"})
     audio: dict[str, Any] = Field(default_factory=lambda: {"provider":"elevenlabs","language":"zh-CN"})
     captions: dict[str, Any] = Field(default_factory=lambda: {"enabled":True,"max_lines":2,"position":"bottom"})
