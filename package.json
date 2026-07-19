@@ -1,0 +1,23 @@
+{
+  "name": "financial-video-workflow",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "render": "remotion render remotion/index.ts FinancialVideo",
+    "studio": "remotion studio remotion/index.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@remotion/cli": "^4.0.343",
+    "@remotion/media": "^4.0.343",
+    "@remotion/transitions": "^4.0.343",
+    "echarts": "^6.0.0",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1",
+    "remotion": "^4.0.343"
+  },
+  "devDependencies": {
+    "@types/react": "^19.1.10",
+    "typescript": "^5.9.2"
+  }
+}

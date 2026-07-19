@@ -1,0 +1,12 @@
+{
+  "schema_version": "1.0", "entity": "NVIDIA Corporation", "ticker": "NVDA",
+  "report": {"fiscal_period": "Q1 FY2027", "period_end": "2026-04-26", "published_at": "2026-05-20", "source_url": "https://investor.nvidia.com/news/press-release-details/2026/NVIDIA-Announces-Financial-Results-for-First-Quarter-Fiscal-2027/default.aspx"},
+  "facts": [
+    {"id":"fact.revenue.q1fy27","metric":"revenue","value":81615000000,"unit":"USD","scale":"ones","currency":"USD","basis":"GAAP","fiscal_period":"Q1 FY2027","period_end":"2026-04-26","comparison":{"qoq_pct":20,"yoy_pct":85},"source":"NVIDIA IR","source_locator":"Q1 Fiscal 2027 Summary / Revenue","confidence":1.0},
+    {"id":"fact.revenue.q4fy26","metric":"revenue","value":68127000000,"unit":"USD","scale":"ones","currency":"USD","basis":"GAAP","fiscal_period":"Q4 FY2026","period_end":"2026-01-25","comparison":{},"source":"NVIDIA IR","source_locator":"Q1 Fiscal 2027 Summary / Revenue","confidence":1.0},
+    {"id":"fact.revenue.q1fy26","metric":"revenue","value":44062000000,"unit":"USD","scale":"ones","currency":"USD","basis":"GAAP","fiscal_period":"Q1 FY2026","period_end":"2025-04-27","comparison":{},"source":"NVIDIA IR","source_locator":"Q1 Fiscal 2027 Summary / Revenue","confidence":1.0},
+    {"id":"fact.datacenter.q1fy27","metric":"data_center_revenue","value":75200000000,"unit":"USD","scale":"ones","currency":"USD","basis":"reported","fiscal_period":"Q1 FY2027","period_end":"2026-04-26","comparison":{"qoq_pct":21,"yoy_pct":92},"source":"NVIDIA IR","source_locator":"Highlights / Data Center","confidence":1.0},
+    {"id":"fact.grossmargin.q1fy27","metric":"gross_margin","value":74.9,"unit":"percent","scale":"percent","currency":null,"basis":"GAAP","fiscal_period":"Q1 FY2027","period_end":"2026-04-26","comparison":{"qoq_points":-0.1,"yoy_points":14.4},"source":"NVIDIA IR","source_locator":"Q1 Fiscal 2027 Summary / Gross margin","confidence":1.0},
+    {"id":"fact.guidance.q2fy27","metric":"revenue_guidance_midpoint","value":91000000000,"unit":"USD","scale":"ones","currency":"USD","basis":"outlook","fiscal_period":"Q2 FY2027","period_end":null,"comparison":{"range_pct":2},"source":"NVIDIA IR","source_locator":"Outlook / Q2 FY2027 revenue","confidence":1.0}
+  ]
+}

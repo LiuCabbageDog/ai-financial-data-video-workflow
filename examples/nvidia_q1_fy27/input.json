@@ -1,0 +1,20 @@
+{
+  "source_materials": {
+    "financial_reports": ["nvidia_q1_fy27_official.pdf"],
+    "earnings_transcript": null,
+    "supplementary_files": [],
+    "disclaimer": "本视频仅供信息与产品演示用途，不构成投资建议。历史表现不代表未来结果，投资涉及风险。"
+  },
+  "content_requirements": {
+    "topic": "英伟达 2027 财年第一季度业绩速览",
+    "objective": "用零售投资者易懂的方式解释增长、业务结构和下一季指引",
+    "required_metrics": ["revenue", "data_center_revenue", "gaap_gross_margin", "revenue_guidance"],
+    "target_duration_seconds": 70
+  },
+  "transcript": {"mode": "generate", "text": null, "allow_editing": true, "language": "zh-CN"},
+  "creative_direction": {"audience": "retail investors", "tone": "engaging and credible", "visual_style": "cartoon", "pacing": "medium-fast", "chart_style": "clean-modern", "motion_style": "playful"},
+  "audio": {"provider": "elevenlabs", "voice_id": "default_financial_narrator", "speaking_rate": 1.0, "background_music": false, "language": "zh-CN"},
+  "captions": {"enabled": true, "mode": "burned_in", "language": "zh-CN", "position": "bottom", "max_lines": 2, "highlight_keywords": true},
+  "brand": {"logo": null, "primary_color": "#76B900", "font_family": "Inter"},
+  "output": {"aspect_ratio": "16:9", "resolution": "1920x1080", "fps": 30, "format": "mp4"}
+}

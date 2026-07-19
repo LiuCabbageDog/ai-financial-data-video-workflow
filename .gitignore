@@ -1,0 +1,39 @@
+# macOS
+.DS_Store
+
+# Environment variables (keep the distributable template)
+.env
+.env.*
+!.env.example
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+*.egg-info/
+build/
+
+# Node.js / TypeScript / Remotion
+node_modules/
+.pnpm-store/
+dist/
+out/
+*.tsbuildinfo
+
+# Workflow runtime artifacts
+runs/
+
+# Temporary media staged for Remotion
+public/*.aiff
+public/*.wav
+public/*.mp3
+
+# Editors
+.vscode/
+.idea/
