@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any, Literal
+from typing import Annotated, Any, Literal, Union
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -78,7 +78,7 @@ class AudioConfig(StrictModel):
 
     provider: str = "elevenlabs"
     voice_id: str | None = None
-    speaking_rate: float = Field(default=1.0, ge=0.5, le=2.0)
+    speaking_rate: float = Field(default=.95, ge=.7, le=1.2)
     background_music: bool = False
     language: str = "zh-CN"
 
@@ -141,6 +141,43 @@ class JobInput(StrictModel):
         return self
 
 
+class MoneyQuantity(StrictModel):
+    kind: Literal["money"]
+    amount: float
+    currency: Literal["USD"]
+
+
+class MoneyPerShareQuantity(StrictModel):
+    kind: Literal["money_per_share"]
+    amount: float
+    currency: Literal["USD"]
+
+
+class PercentageQuantity(StrictModel):
+    kind: Literal["percentage"]
+    value: float
+    semantics: Literal["level", "change"]
+
+
+class PercentagePointsQuantity(StrictModel):
+    kind: Literal["percentage_points"]
+    value: float
+
+
+class CountQuantity(StrictModel):
+    kind: Literal["count"]
+    value: float
+    subject: str
+
+
+class RatioQuantity(StrictModel):
+    kind: Literal["ratio"]
+    value: float
+
+
+CanonicalQuantity = Annotated[Union[MoneyQuantity, MoneyPerShareQuantity, PercentageQuantity, PercentagePointsQuantity, CountQuantity, RatioQuantity], Field(discriminator="kind")]
+
+
 class CanonicalFact(StrictModel):
     """One source-addressable financial fact in normalized base units."""
 
@@ -159,6 +196,8 @@ class CanonicalFact(StrictModel):
     confidence: float = Field(ge=0, le=1)
     derived_from: list[str] = Field(default_factory=list)
     formula: str | None = None
+    quantity: CanonicalQuantity | None = None
+    reported: dict[str, Any] | None = None
 
 
 class CanonicalFacts(StrictModel):
@@ -184,6 +223,8 @@ class Scene(StrictModel):
     """A renderer-supported scene boundary."""
 
     id: str
+    kind: Literal["content", "disclaimer"] = "content"
+    visual_kind: Literal["chart", "metric_cards", "broll", "disclaimer"] = "broll"
     purpose: str
     duration_seconds: float = Field(gt=0, le=120)
     title: str | None = None
@@ -222,10 +263,12 @@ class Chart(StrictModel):
     """Finite chart template selected by the planner."""
 
     id: str
-    type: Literal["bar", "donut", "range", "price_line"]
+    type: Literal["bar", "horizontal_bar", "donut", "range", "line", "price_line", "waterfall", "gauge", "metric_cards", "table"]
     title: str | None = None
     labels: list[str] = Field(default_factory=list)
     values: list[float] = Field(default_factory=list)
+    formatted_values: list[str] = Field(default_factory=list)
+    units: list[str] = Field(default_factory=list)
     unit: str | None = None
     midpoint: float | None = None
     low: float | None = None
@@ -251,6 +294,187 @@ class PlanningBundle(StrictModel):
     scene_plan: ScenePlan
     narration: Narration
     chart_spec: ChartSpec
+
+
+# OpenAI Structured Outputs contract. The model chooses facts and references;
+# application code owns unit conversion and every displayed numeric string.
+class ProviderMoneyQuantity(StrictModel):
+    kind: Literal["money"]
+    amount: float
+    currency: Literal["USD"]
+    magnitude: Literal["ones", "thousands", "millions", "billions", "trillions"]
+
+
+class ProviderMoneyPerShareQuantity(StrictModel):
+    kind: Literal["money_per_share"]
+    amount: float
+    currency: Literal["USD"]
+    magnitude: Literal["ones", "thousands", "millions", "billions", "trillions"]
+
+
+class ProviderPercentageQuantity(StrictModel):
+    kind: Literal["percentage"]
+    value: float
+    semantics: Literal["level", "change"]
+
+
+class ProviderPercentagePointsQuantity(StrictModel):
+    kind: Literal["percentage_points"]
+    value: float
+
+
+class ProviderCountQuantity(StrictModel):
+    kind: Literal["count"]
+    value: float
+    subject: str
+    magnitude: Literal["ones", "thousands", "millions", "billions", "trillions"]
+
+
+class ProviderRatioQuantity(StrictModel):
+    kind: Literal["ratio"]
+    value: float
+
+
+ProviderQuantity = Union[ProviderMoneyQuantity, ProviderMoneyPerShareQuantity, ProviderPercentageQuantity, ProviderPercentagePointsQuantity, ProviderCountQuantity, ProviderRatioQuantity]
+
+
+class ProviderReport(StrictModel):
+    title: str
+    document_type: str
+    fiscal_period: str
+    period_end: str | None
+
+
+class ProviderCanonicalFact(StrictModel):
+    id: str
+    metric: str
+    quantity: ProviderQuantity
+    reported_value: float
+    reported_unit_text: str
+    basis: str
+    fiscal_period: str
+    period_end: str | None
+    source: str
+    source_locator: str
+    confidence: float = Field(ge=0, le=1)
+    derived_from: list[str]
+    formula: str | None
+
+
+class ProviderCanonicalFacts(StrictModel):
+    schema_version: str
+    entity: str
+    ticker: str | None
+    report: ProviderReport
+    facts: list[ProviderCanonicalFact] = Field(min_length=1)
+
+
+class ProviderInsight(StrictModel):
+    title: str
+    summary: str
+    fact_ids: list[str]
+
+
+class ProviderFinancialAnalysis(StrictModel):
+    summary: str
+    insights: list[ProviderInsight]
+
+
+class ProviderStoryBeat(StrictModel):
+    purpose: str
+    summary: str
+    fact_ids: list[str]
+
+
+class ProviderStoryPlan(StrictModel):
+    title: str
+    thesis: str
+    beats: list[ProviderStoryBeat]
+
+
+class ProviderScene(StrictModel):
+    id: str
+    kind: Literal["content", "disclaimer"]
+    visual_kind: Literal["chart", "metric_cards", "broll", "disclaimer"]
+    purpose: str
+    duration_seconds: float = Field(gt=0, le=120)
+    title: str | None
+    chart: str | None
+    asset_subject: str | None
+    subject_id: str | None
+    visual_prompt: str | None
+    transition: Literal["cut", "fade", "slide", "wipe", "zoom"]
+
+
+class ProviderTextPart(StrictModel):
+    type: Literal["text"]
+    value: str = Field(pattern=r"^[^0-9０-９$¥€£%]*$")
+
+
+class ProviderFactPart(StrictModel):
+    type: Literal["fact"]
+    fact_id: str
+    precision: int = Field(ge=0, le=4)
+    compact: bool
+
+
+ProviderNarrationPart = Union[ProviderTextPart, ProviderFactPart]
+
+
+class ProviderNarrationSegment(StrictModel):
+    scene_id: str
+    parts: list[ProviderNarrationPart] = Field(min_length=1)
+
+
+class ProviderNarration(StrictModel):
+    language: str
+    segments: list[ProviderNarrationSegment] = Field(min_length=1)
+    source: str
+    editing_applied: bool | None
+
+
+class ProviderChartPoint(StrictModel):
+    label: str
+    fact_id: str
+    role: Literal["value", "low", "midpoint", "high"]
+
+
+class ProviderChart(StrictModel):
+    id: str
+    type: Literal["bar", "horizontal_bar", "donut", "range", "line", "price_line", "waterfall", "gauge", "metric_cards", "table"]
+    title: str | None
+    series: list[ProviderChartPoint] = Field(min_length=1)
+    precision: int = Field(ge=0, le=4)
+    compact: bool
+    animation: Literal["grow", "sweep", "pan-and-highlight", "draw-and-highlight"]
+
+
+class ProviderCaptionRegion(StrictModel):
+    x: float
+    y: float
+    width: float
+    height: float
+
+
+class ProviderChartSpec(StrictModel):
+    caption_region: ProviderCaptionRegion
+    charts: list[ProviderChart]
+
+
+class ProviderPlanningBundle(StrictModel):
+    """OpenAI-facing contract that is valid with Structured Outputs strict mode."""
+
+    canonical_facts: ProviderCanonicalFacts
+    financial_analysis: ProviderFinancialAnalysis
+    story_plan: ProviderStoryPlan
+    scene_plan: list[ProviderScene] = Field(min_length=1, max_length=12)
+    narration: ProviderNarration
+    chart_spec: ProviderChartSpec
+
+    def to_domain(self) -> PlanningBundle:
+        """Normalize facts and compile all numeric references into domain artifacts."""
+        from .facts import compile_provider_bundle
+        return compile_provider_bundle(self)
 
 
 class JobRecord(StrictModel):

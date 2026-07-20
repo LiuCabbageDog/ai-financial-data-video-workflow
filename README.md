@@ -123,6 +123,10 @@ ELEVENLABS_VOICE_ID=
 ELEVENLABS_BASE_URL=https://api.elevenlabs.io/v1
 ELEVENLABS_MODEL_ID=eleven_multilingual_v2
 ELEVENLABS_OUTPUT_FORMAT=mp3_44100_128
+ELEVENLABS_STABILITY=0.45
+ELEVENLABS_SIMILARITY_BOOST=0.75
+ELEVENLABS_STYLE=0
+ELEVENLABS_USE_SPEAKER_BOOST=true
 
 BACH_ACCESS_KEY=
 BACH_SECRET_KEY=
@@ -203,7 +207,7 @@ Production mode requires all of the following before it starts billable work:
 
 - `OPENAI_API_KEY`: generates canonical facts and the planning bundle through the Responses API.
 - `OPENAI_MODEL`: defaults to `gpt-5-mini`; pin a model/snapshot according to the deployment's quality and reproducibility policy.
-- `ELEVENLABS_API_KEY` and `ELEVENLABS_VOICE_ID`: authenticate TTS and select an accessible voice. `ELEVENLABS_MODEL_ID` defaults to the Chinese-capable, long-form `eleven_multilingual_v2`; `ELEVENLABS_OUTPUT_FORMAT` defaults to `mp3_44100_128` and is sent as the official query parameter.
+- `ELEVENLABS_API_KEY` and `ELEVENLABS_VOICE_ID`: authenticate TTS and select an accessible voice. Configure the voice ID as a natural Mandarin professional voice suitable for financial narration. `ELEVENLABS_SPEED` controls base delivery speed (default `1.02`). `MANDARIN_CHARS_PER_SECOND` calibrates pre-normalization narration planning (default `4.4`). `NARRATION_PLANNING_TOLERANCE=0.10` controls the LLM rewrite band, while `TARGET_DURATION_TOLERANCE=0.15` controls real TTS acceptance. `NARRATION_REWRITE_ATTEMPTS` defaults to `3`; `TTS_AUTO_FIT_DURATION=true` permits one bounded `0.90–1.20` second TTS pass using the real first-pass duration. `eleven_multilingual_v2` remains the default model; stability defaults to `0.45`, similarity boost to `0.75`, style to `0`, and speaker boost is enabled.
 - `BACH_ACCESS_KEY` and `BACH_SECRET_KEY`: sign BACH bearer tokens; the documented base URL and endpoint paths have working defaults.
 - One or more readable local PDF paths in `source_materials.financial_reports`.
 - A non-empty disclaimer in `source_materials.disclaimer`.
@@ -258,11 +262,11 @@ The CLI `--mode` value overrides `ADAPTER_MODE`, so the selected mode is explici
 Production execution is:
 
 1. Parse each local PDF with PyMuPDF and preserve page-level text.
-2. Call OpenAI once for canonical facts, financial analysis, story plan, scene plan, narration, and chart spec.
+2. Call OpenAI for a data-first plan. If generated narration is below 85% of the requested duration, rewrite only Narration once while reusing facts, analysis, story, scenes, and charts.
 3. Pause after Story Plan, Narration, and Chart Spec; persist each decision and resume from the approved checkpoint without repeating the OpenAI planning call.
-4. Call ElevenLabs for Chinese speech and character timestamps.
-5. For every scene, try BACH video; on failure try BACH image plus Remotion camera motion; on another failure use built-in graphics.
-6. Compile the animation timeline and render manifest.
+4. Call ElevenLabs for Chinese speech and character timestamps using the configured natural voice settings.
+5. Compile short-clause captions and Scene boundaries from the real audio timestamps. A final disclaimer gets at least four seconds without shifting earlier cues.
+6. Call BACH only for `visual_kind=broll`. Charts, metric cards, and disclaimers use deterministic data templates.
 7. Render H.264/AAC MP4 with Remotion.
 8. Produce automated QA and manual-review keyframes.
 
@@ -403,9 +407,11 @@ States are `queued`, `running`, `waiting_review`, `rendering`, `qa`, `completed`
 
 ## Canonical facts and safety rules
 
-Canonical facts retain `metric`, base-unit `value`, `unit`, `scale`, `currency`, accounting `basis`, `fiscal_period`, calendar `period_end`, comparison, page-level source locator, and confidence. Derived facts must identify input fact IDs and formulas. Numeric narration and chart claims must cite canonical fact IDs.
+Production facts cross the provider boundary as typed quantities (`money`, `money_per_share`, `percentage`, `percentage_points`, `count`, or `ratio`) and are immediately normalized to base units while retaining the report's original value and unit text for audit. Derived facts identify their input fact IDs and formulas.
 
-Narration stores `display_text` separately from `spoken_text`. Subtitle layout reserves the lower safe region and limits burned-in subtitles to two lines. Transition selection is limited to implemented templates: `cut`, `fade`, `slide`, `wipe`, and `zoom`.
+The production planner does not author numeric narration or chart values directly. Narration is returned as text/fact parts, and charts as fact-backed series; the application formats every displayed number from canonical facts. The complete bundle is compiled and reference-validated before the first review gate. Pre-written user transcripts retain a separate conflict check because their numeric text is supplied outside this fact-reference contract.
+
+Narration stores `display_text` separately from natural Mandarin `spoken_text`. Subtitle layout reserves the lower safe region, limits burned-in subtitles to two lines, and renders only the short-clause cue active at the current audio frame. Non-disclaimer scenes must be at least 80% charts or metric cards, include at least two chart scenes and one metric-card scene, and use no more than 20% B-roll.
 
 ## Tests and verification
 
@@ -415,7 +421,7 @@ pytest -q
 npx tsc --noEmit
 ```
 
-Automated QA checks fact references, transition templates, timeline bounds, subtitle safe regions, non-empty captions, narration audio, disclaimer presence/duration, and a non-empty video. A production approval process should additionally inspect the keyframe times listed in `qa_report.json` and independently verify financial facts.
+Automated QA checks fact traceability, audio/content timing within 0.5 seconds, monotonic non-overlapping short-clause cues, complete narration caption coverage, Scene cue bounds, data-visual coverage, chart/metric-card/B-roll counts, disclaimer duration, and a non-empty video. The report records actual audio/video duration, caption coverage, data-visual share, and failure details.
 
 The repository test suite uses mocked/local boundaries and therefore incurs no provider cost. A final live production smoke test still requires operator-owned OpenAI, ElevenLabs, and BACH credentials in the local uncommitted `.env`. Never paste credentials into job JSON, logs, chat, or source control. BACH deployments differ; confirm their submit/status/result contract and pricing variables before that run.
 

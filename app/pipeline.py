@@ -1,7 +1,8 @@
 """Deterministic, artifact-first workflow used locally and by the API worker."""
 from __future__ import annotations
 
-import hashlib, json, re, shutil, subprocess, time
+import hashlib, json, math, re, shutil, subprocess, time
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,36 @@ from .adapters import BachAssets, ElevenLabsTTS, OpenAIPlanner, parse_financial_
 ROOT = Path(__file__).resolve().parents[1]
 RUNS = ROOT / "runs"
 REVIEW_NODES = {"story_plan", "narration", "chart_spec"}
+
+
+def money_base_units(fact:dict[str,Any]) -> float:
+    """Convert a currency fact's declared scale to base monetary units."""
+    scale=str(fact.get("scale","ones")).strip().lower().replace("_","-")
+    multipliers={
+        "one":1.0,"ones":1.0,"unit":1.0,"units":1.0,"per-share":1.0,
+        "thousand":1e3,"thousands":1e3,"k":1e3,
+        "million":1e6,"millions":1e6,"m":1e6,
+        "billion":1e9,"billions":1e9,"b":1e9,
+        "trillion":1e12,"trillions":1e12,"t":1e12,
+    }
+    multiplier=multipliers.get(scale)
+    if multiplier is None: raise ValueError(f"unsupported currency scale: {fact.get('scale')}")
+    return float(fact["value"])*multiplier
+
+
+def percentage_claim_supported(claim:str,allowed:set[float]) -> bool:
+    """Match a displayed percentage using its stated decimal precision."""
+    decimals=len(claim.partition(".")[2]) if "." in claim else 0
+    rounding_tolerance=.5*(10**-decimals)
+    value=float(claim)
+    return any(abs(value-candidate)<=rounding_tolerance+1e-9 for candidate in allowed)
+
+
+def is_disclaimer_scene(scene:dict[str,Any]) -> bool:
+    """Identify disclaimer scenes by stable kind, with legacy-language fallback."""
+    if scene.get("kind") in {"content","disclaimer"}: return scene["kind"]=="disclaimer"
+    text=f"{scene.get('purpose','')} {scene.get('title','')}".lower()
+    return "disclaimer" in text or "免责声明" in text or "法律提示" in text
 TRANSITIONS = {"cut", "fade", "slide", "wipe", "zoom"}
 
 
@@ -32,10 +63,58 @@ def normalize_spoken(display: str) -> str:
     spoken=display
     for pattern, value in replacements: spoken=re.sub(pattern,value,spoken,flags=re.I)
     spoken=re.sub(r"Q([1-4])\s*FY(\d{4})",lambda m:f"{m.group(2)}财年第{m.group(1)}季度",spoken,flags=re.I)
-    scales={"K":"千","M":"百万","B":"十亿","T":"万亿"}
-    spoken=re.sub(r"([$¥€£])\s*(-?\d+(?:\.\d+)?)\s*([KMBT])\b",lambda m:f"{m.group(2)}{scales[m.group(3).upper()]}{'美元' if m.group(1)=='$' else '元'}",spoken,flags=re.I)
-    spoken=re.sub(r"(\d+(?:\.\d+)?)%", lambda m: f"百分之{m.group(1)}", spoken)
+    multipliers={"K":Decimal("1000"),"M":Decimal("1000000"),"B":Decimal("1000000000"),"T":Decimal("1000000000000")}
+    def money(match:re.Match[str])->str:
+        amount=Decimal(match.group(2))*multipliers.get((match.group(3) or "").upper(),Decimal("1")); currency="美元" if match.group(1)=="$" else "元"
+        per_share=bool(match.group(4)); rendered=_spoken_money(amount)
+        return f"每股{rendered}{currency}" if per_share else f"{rendered}{currency}"
+    spoken=re.sub(r"([$¥€£])\s*(-?\d+(?:\.\d+)?)\s*([KMBT])?\s*(/股|每股)?",money,spoken,flags=re.I)
+    spoken=re.sub(r"(-?\d+(?:\.\d+)?)%",lambda m:f"百分之{_spoken_number(Decimal(m.group(1)))}",spoken)
     return spoken.replace("+", "增长").replace("±", "上下浮动").replace("−","负").replace("-", "负")
+
+
+def _spoken_integer(value:int)->str:
+    """Render a non-negative integer with standard Mandarin section units."""
+    if value==0: return "零"
+    digits="零一二三四五六七八九"; section_units=["","万","亿","万亿"]
+    sections=[]
+    while value: sections.append(value%10000); value//=10000
+    out=""; pending_zero=False
+    for index in range(len(sections)-1,-1,-1):
+        section=sections[index]
+        if not section: pending_zero=bool(out); continue
+        if out and (pending_zero or section<1000): out+="零"
+        chars=""; zero=False
+        for divisor,unit in ((1000,"千"),(100,"百"),(10,"十"),(1,"")):
+            digit=section//divisor; section%=divisor
+            if digit:
+                if zero and chars: chars+="零"
+                chars+=digits[digit]+unit; zero=False
+            elif chars and section: zero=True
+        out+=chars+section_units[index]; pending_zero=False
+    return out[1:] if out.startswith("一十") else out
+
+
+def _spoken_number(value:Decimal)->str:
+    sign="负" if value<0 else ""; rendered=format(abs(value),"f")
+    if "." in rendered: rendered=rendered.rstrip("0").rstrip(".")
+    whole,dot,fraction=rendered.partition("."); result=_spoken_integer(int(whole))
+    if dot: result+="点"+"".join("零一二三四五六七八九"[int(d)] for d in fraction)
+    return sign+result
+
+
+def _spoken_money(amount:Decimal)->str:
+    absolute=abs(amount); sign="负" if amount<0 else ""
+    for divisor,unit in ((Decimal("100000000"),"亿"),(Decimal("10000"),"万")):
+        if absolute>=divisor and absolute%divisor==0: return sign+_spoken_number(absolute/divisor)+unit
+    return _spoken_number(amount)
+
+
+def visual_summary(scenes:dict[str,Any],narration:dict[str,Any]|None=None)->dict[str,Any]:
+    """Return the common review, manifest, and QA data-visual metrics."""
+    content=[scene for scene in scenes["scenes"] if not is_disclaimer_scene(scene)]
+    count=max(1,len(content)); data=sum(scene.get("visual_kind") in {"chart","metric_cards"} for scene in content)
+    return {"data_visual_coverage":round(data/count,3),"chart_count":sum(scene.get("visual_kind")=="chart" for scene in content),"metric_card_count":sum(scene.get("visual_kind")=="metric_cards" for scene in content),"broll_count":sum(scene.get("visual_kind")=="broll" for scene in content),"content_scene_count":len(content),"estimated_audio_seconds":round(sum(len(s["spoken_text"]) for s in (narration or {}).get("segments",[]))/4.8,2)}
 
 
 def write_artifact(run_dir: Path, name: str, value: Any) -> str:
@@ -59,7 +138,7 @@ class Pipeline:
 
     def retry_scene(self,scene_id:str,overrides:dict[str,Any],retry_path:Path)->JobRecord:
         """Regenerate one scene's assets and rebuild only shared downstream artifacts."""
-        allowed={"purpose","title","duration_seconds","visual_prompt","transition","chart","asset_subject","subject_id"}
+        allowed={"purpose","title","duration_seconds","visual_kind","visual_prompt","transition","chart","asset_subject","subject_id"}
         unknown=set(overrides)-allowed
         if unknown: raise ValueError(f"unsupported scene retry overrides: {sorted(unknown)}")
         self.record.status=JobStatus.RUNNING; self.record.current_node=f"retry:{scene_id}"; self.save_record(); started=time.time()
@@ -93,16 +172,26 @@ class Pipeline:
                 self._node("conflict_report", conflict); self.record.status=JobStatus.BLOCKED_CONFLICT; self.save_record(); return self.record
             analysis=bundle["financial_analysis"] if bundle else self._analysis(facts); self._node("financial_analysis",analysis)
             story=bundle["story_plan"] if bundle else self._story()
-            if not self._reviewable("story_plan",story): return self.record
-            scenes=ScenePlan.model_validate(bundle["scene_plan"] if bundle else self._scenes()).model_dump(mode="json"); self._node("scene_plan",scenes)
+            scenes=ScenePlan.model_validate(bundle["scene_plan"] if bundle else self._scenes()).model_dump(mode="json"); self._validate_visual_mix(scenes)
             narration=self._validate_narration(self._resolve_narration(scenes,bundle),scenes,facts)
+            self._node("review_summary",visual_summary(scenes,narration))
+            if not self._reviewable("story_plan",story): return self.record
+            self._node("scene_plan",scenes)
             if not self._reviewable("narration",narration): return self.record
             charts=ChartSpec.model_validate(bundle["chart_spec"] if bundle else self._charts()).model_dump(mode="json"); self._validate_charts(charts,scenes,facts)
             if not self._reviewable("chart_spec",charts): return self.record
             if self.settings.mode == "production":
-                spoken="。".join(x["spoken_text"] for x in narration["segments"]); public=ROOT/"public"; public.mkdir(exist_ok=True); audio_name=f"{self.job_id}-narration.mp3"
-                audio,tts_meta=ElevenLabsTTS(self.settings).synthesize(spoken,public/audio_name); shutil.copy2(public/audio_name,self.run_dir/"narration.mp3"); audio["remotion_static_src"]=audio_name
-                alignment=self._phrase_alignment(narration,audio.pop("alignment")); self._node("alignment",alignment)
+                spoken,spans=self._tts_script(narration); public=ROOT/"public"; public.mkdir(exist_ok=True); audio_name=f"{self.job_id}-narration.mp3"
+                adapter=ElevenLabsTTS(self.settings); audio,tts_meta=adapter.synthesize(spoken,public/audio_name,self.settings.elevenlabs_speed)
+                alignment=self._phrase_alignment(spans,audio.pop("alignment")); initial_duration=alignment["duration_seconds"]
+                adjusted_speed=self._duration_adjusted_speed(initial_duration,self.settings.elevenlabs_speed)
+                if adjusted_speed is not None:
+                    audio,fit_meta=adapter.synthesize(spoken,public/audio_name,adjusted_speed); alignment=self._phrase_alignment(spans,audio.pop("alignment"))
+                    audio["duration_fit"]={"initial_duration_seconds":initial_duration,"initial_speed":self.settings.elevenlabs_speed,"adjusted_speed":adjusted_speed,"adjusted_duration_seconds":alignment["duration_seconds"]}
+                    for key in ("api_calls","cost_usd","latency_ms"): tts_meta[key]=tts_meta.get(key,0)+fit_meta.get(key,0)
+                    tts_meta["voice_settings"]=fit_meta["voice_settings"]
+                shutil.copy2(public/audio_name,self.run_dir/"narration.mp3"); audio["remotion_static_src"]=audio_name; self._node("alignment",alignment)
+                self._validate_target_duration(alignment,audio.get("duration_fit"))
                 self._node("tts",audio,tts_chars=len(spoken),usage_meta=tts_meta)
             else:
                 alignment=self._tts_alignment(narration); self._node("alignment",alignment)
@@ -139,30 +228,26 @@ class Pipeline:
         """Block unsupported percentage, money, fiscal-period, or direction claims."""
         if self.request.transcript.mode!="pre-written": return None
         text=self.request.transcript.text or ""; fact_list=facts["facts"]
-        allowed_pct={round(float(v),4) for f in fact_list for v in f.get("comparison",{}).values()}|{round(float(f["value"]),4) for f in fact_list if f.get("unit")=="percent"}
-        claimed_pct={round(float(x),4) for x in re.findall(r"(-?\d+(?:\.\d+)?)\s*%",text)}
+        allowed_pct={round(float(v),4) for f in fact_list for v in f.get("comparison",{}).values()}|{round(float(f["value"]),4) for f in fact_list if str(f.get("unit","")).lower() in {"percent","%"}}
+        claimed_pct_tokens=re.findall(r"(-?\d+(?:\.\d+)?)\s*%",text); claimed_pct={round(float(x),4) for x in claimed_pct_tokens}
         scales={"K":1e3,"M":1e6,"B":1e9,"T":1e12}; claimed_money=[]
         for amount,scale in re.findall(r"[$¥€£]\s*(-?\d+(?:\.\d+)?)\s*([KMBT])\b",text,re.I): claimed_money.append(float(amount)*scales[scale.upper()])
-        allowed_money=[float(f["value"]) for f in fact_list if f.get("currency")]
+        allowed_money=[money_base_units(f) for f in fact_list if f.get("currency")]
         bad_money=[v for v in claimed_money if not any(abs(v-a)<=max(1,abs(a)*.006) for a in allowed_money)]
         periods=set(re.findall(r"Q[1-4]\s*FY\d{4}",text,re.I)); allowed_periods={str(f.get("fiscal_period","")).replace(" ","").upper() for f in fact_list}
         bad_periods=sorted(p for p in periods if p.replace(" ","").upper() not in allowed_periods)
         direction_error=bool(re.search(r"(?:下降|减少|down|declin)",text,re.I) and any(v>0 for v in claimed_pct) and claimed_pct & {abs(v) for v in allowed_pct if v>0})
-        report={"status":"blocked","reason":"transcript_fact_conflict","unsupported_percentages":sorted(claimed_pct-allowed_pct),"unsupported_money_base_units":bad_money,"unsupported_periods":bad_periods,"direction_conflict":direction_error,"action":"Correct transcript or provide a cited supplementary source."}
+        unsupported_pct=sorted({float(value) for value in claimed_pct_tokens if not percentage_claim_supported(value,allowed_pct)})
+        report={"status":"blocked","reason":"transcript_fact_conflict","unsupported_percentages":unsupported_pct,"unsupported_money_base_units":bad_money,"unsupported_periods":bad_periods,"direction_conflict":direction_error,"action":"Correct transcript or provide a cited supplementary source."}
         return report if any([report["unsupported_percentages"],bad_money,bad_periods,direction_error]) else None
 
     def _validate_narration(self,narration:dict[str,Any],scenes:dict[str,Any],facts:dict[str,Any])->dict[str,Any]:
-        """Normalize spoken text and enforce scene/fact referential integrity."""
+        """Normalize spoken text and enforce references after fact-part compilation."""
         narration=Narration.model_validate(narration).model_dump(mode="json"); scene_ids={s["id"] for s in scenes["scenes"]}; fact_ids={f["id"] for f in facts["facts"]}
         for segment in narration["segments"]:
             if segment["scene_id"] not in scene_ids: raise ValueError(f"narration references unknown scene: {segment['scene_id']}")
             missing=set(segment["fact_ids"])-fact_ids
             if missing: raise ValueError(f"narration references unknown facts: {sorted(missing)}")
-            referenced=[f for f in facts["facts"] if f["id"] in segment["fact_ids"]]
-            claimed_pct={float(v) for v in re.findall(r"(-?\d+(?:\.\d+)?)\s*%",segment["display_text"])}; allowed_pct={float(v) for f in referenced for v in f.get("comparison",{}).values()}|{float(f["value"]) for f in referenced if f.get("unit")=="percent"}
-            if any(not any(abs(v-a)<.01 for a in allowed_pct) for v in claimed_pct): raise ValueError(f"narration contains unsupported percentage in scene {segment['scene_id']}")
-            scales={"K":1e3,"M":1e6,"B":1e9,"T":1e12}; claimed_money=[float(v)*scales[s.upper()] for v,s in re.findall(r"[$¥€£]\s*(-?\d+(?:\.\d+)?)\s*([KMBT])\b",segment["display_text"],re.I)]; allowed_money=[float(f["value"]) for f in referenced if f.get("currency")]
-            if any(not any(abs(v-a)<=max(1,abs(a)*.006) for a in allowed_money) for v in claimed_money): raise ValueError(f"narration contains unsupported money value in scene {segment['scene_id']}")
             segment["spoken_text"]=normalize_spoken(segment["display_text"])
         return narration
 
@@ -175,13 +260,70 @@ class Pipeline:
             missing=set(chart.get("fact_ids",[]))-fact_ids
             if missing: raise ValueError(f"chart references unknown facts: {sorted(missing)}")
 
-    def _phrase_alignment(self,narration:dict[str,Any],raw:dict[str,Any])->dict[str,Any]:
-        """Group ElevenLabs character timestamps into scene-level phrases."""
-        starts=raw.get("character_start_times_seconds",[]); ends=raw.get("character_end_times_seconds",[]); cursor=0; phrases=[]
+    def _validate_target_duration(self,alignment:dict[str,Any],duration_fit:dict[str,Any]|None=None) -> None:
+        """Stop before asset generation when generated speech misses the requested duration."""
+        if not self.request.content_requirements: return
+        target=float(self.request.content_requirements.target_duration_seconds); actual=float(alignment.get("duration_seconds",0)); tolerance=self.settings.target_duration_tolerance
+        if not target*(1-tolerance)<=actual<=target*(1+tolerance):
+            details=""
+            if duration_fit: details=f"; initial={float(duration_fit['initial_duration_seconds']):.1f}s, adjusted_speed={float(duration_fit['adjusted_speed']):.3f}, second={actual:.1f}s"
+            raise RuntimeError(f"Actual narration duration {actual:.1f}s is outside target {target:.1f}s ±{tolerance:.0%} after duration fitting{details}")
+
+    def _duration_adjusted_speed(self,actual_duration:float,base_speed:float) -> float|None:
+        """Return one bounded TTS speed correction when actual generated audio misses target."""
+        if not self.settings.tts_auto_fit_duration or not self.request.content_requirements: return None
+        target=float(self.request.content_requirements.target_duration_seconds); tolerance=self.settings.target_duration_tolerance
+        if target*(1-tolerance)<=actual_duration<=target*(1+tolerance): return None
+        adjusted=round(max(.9,min(1.2,base_speed*actual_duration/target)),3)
+        return adjusted if abs(adjusted-base_speed)>=.005 else None
+
+    def _validate_visual_mix(self,scenes:dict[str,Any])->None:
+        """Enforce the data-first scene contract in every adapter mode."""
+        summary=visual_summary(scenes); content=summary["content_scene_count"]
+        if summary["data_visual_coverage"]<.8: raise ValueError("data visual coverage must be at least 80%")
+        if summary["chart_count"]<2: raise ValueError("at least two chart scenes are required")
+        if summary["metric_card_count"]<1: raise ValueError("at least one metric_cards scene is required")
+        if summary["broll_count"]>math.floor(content*.2): raise ValueError("broll may occupy at most 20% of content scenes")
+
+    def _tts_script(self,narration:dict[str,Any])->tuple[str,list[dict[str,Any]]]:
+        """Build the exact TTS string and character spans for short caption clauses."""
+        script=""; spans=[]
         for segment in narration["segments"]:
-            length=len(segment["spoken_text"]); start=starts[cursor] if cursor<len(starts) else (phrases[-1]["end_seconds"] if phrases else 0.0); end_index=min(len(ends)-1,cursor+max(0,length-1)); end=ends[end_index] if ends and end_index>=0 else start+max(1,length/5.2)
-            phrases.append({"scene_id":segment["scene_id"],"start_seconds":round(float(start),3),"end_seconds":round(float(end),3),"display_text":segment["display_text"],"spoken_text":segment["spoken_text"]}); cursor+=length+1
-        return {"provider":"elevenlabs","phrases":phrases,"duration_seconds":phrases[-1]["end_seconds"] if phrases else 0,"character_alignment":raw}
+            if script: script+="\n"
+            # Do not split on an ASCII period: it is commonly a decimal point
+            # in captions such as $81.6B and caused whole-scene cue fallbacks.
+            spoken_parts=[p for p in re.split(r"(?<=[，。！？；：,!?;:])",segment["spoken_text"]) if p]
+            display_parts=[p for p in re.split(r"(?<=[，。！？；：,!?;:])",segment["display_text"]) if p]
+            if len(display_parts)!=len(spoken_parts): display_parts=[segment["display_text"]]*len(spoken_parts)
+            for index,part in enumerate(spoken_parts):
+                start=len(script); script+=part; spans.append({"scene_id":segment["scene_id"],"text":display_parts[index].strip(),"spoken_text":part.strip(),"start_char":start,"end_char":len(script)-1})
+        return script,spans
+
+    def _phrase_alignment(self,spans:list[dict[str,Any]],raw:dict[str,Any])->dict[str,Any]:
+        """Compile precise short-clause cues from ElevenLabs character timestamps."""
+        if isinstance(spans,dict):
+            _,spans=self._tts_script(spans)
+        starts=raw.get("character_start_times_seconds",[]); ends=raw.get("character_end_times_seconds",[]); cues=[]
+        script_length=max((span["end_char"] for span in spans),default=-1)+1
+        aligned_length=min(len(starts),len(ends)); exact_indices=aligned_length==script_length
+        def aligned_index(character_index:int,is_end:bool=False)->int:
+            if not aligned_length: return 0
+            if exact_indices: return min(character_index,aligned_length-1)
+            # Safe fallback for normalized alignments (for example Mandarin
+            # expanded to pinyin): preserve the global temporal proportion.
+            ratio=(character_index+1 if is_end else character_index)/max(1,script_length)
+            projected=math.ceil(ratio*aligned_length)-1 if is_end else math.floor(ratio*aligned_length)
+            return min(aligned_length-1,max(0,projected))
+        for span in spans:
+            start_i=aligned_index(span["start_char"]); end_i=aligned_index(span["end_char"],True)
+            start=float(starts[start_i]) if starts else (cues[-1]["end_seconds"] if cues else 0)
+            end=float(ends[end_i]) if ends else start+max(.3,len(span["spoken_text"])/4.2)
+            cues.append({**{k:span[k] for k in ("scene_id","text","spoken_text")},"start_seconds":round(start,3),"end_seconds":round(max(start,end),3)})
+        phrases=[]
+        for scene_id in dict.fromkeys(c["scene_id"] for c in cues):
+            group=[c for c in cues if c["scene_id"]==scene_id]; phrases.append({"scene_id":scene_id,"start_seconds":group[0]["start_seconds"],"end_seconds":group[-1]["end_seconds"],"display_text":"".join(c["text"] for c in group),"spoken_text":"".join(c["spoken_text"] for c in group)})
+        duration=float(ends[-1]) if ends else (cues[-1]["end_seconds"] if cues else 0)
+        return {"provider":"elevenlabs","phrases":phrases,"caption_cues":cues,"duration_seconds":round(duration,3),"alignment_index_mode":"exact" if exact_indices else "proportional_fallback","character_alignment":raw}
 
     def _analysis(self,facts:dict[str,Any])->dict[str,Any]:
         """Create fact-ID-only insights without permitting invented values."""
@@ -195,42 +337,55 @@ class Pipeline:
     def _scenes(self)->dict[str,Any]:
         """Define scene-level retry boundaries and reusable subject references."""
         target=self.request.content_requirements.target_duration_seconds if self.request.content_requirements else 70; factor=target/70
-        base=[{"id":"s1","purpose":"hook","duration_seconds":8,"asset_subject":"mascot-chip","transition":"zoom"},{"id":"s2","purpose":"revenue trend","duration_seconds":18,"chart":"revenue-bars","transition":"slide"},{"id":"s3","purpose":"data center mix","duration_seconds":16,"chart":"mix-donut","asset_subject":"mascot-chip","transition":"wipe"},{"id":"s4","purpose":"margin and guidance","duration_seconds":18,"chart":"guidance-range","transition":"fade"},{"id":"s5","purpose":"disclaimer","duration_seconds":10,"transition":"cut"}]
-        for scene in base: scene["duration_seconds"]=round(max(4 if scene["purpose"]=="disclaimer" else 2,scene["duration_seconds"]*factor),2)
+        base=[{"id":"s1","kind":"content","visual_kind":"broll","purpose":"hook","duration_seconds":7,"asset_subject":"mascot-chip","transition":"zoom"},{"id":"s2","kind":"content","visual_kind":"chart","purpose":"revenue trend","duration_seconds":15,"chart":"revenue-bars","transition":"slide"},{"id":"s3","kind":"content","visual_kind":"chart","purpose":"data center mix","duration_seconds":14,"chart":"mix-donut","transition":"wipe"},{"id":"s4","kind":"content","visual_kind":"chart","purpose":"margin trend","duration_seconds":13,"chart":"margin-line","transition":"fade"},{"id":"s5","kind":"content","visual_kind":"metric_cards","purpose":"guidance and outlook","duration_seconds":13,"chart":"guidance-cards","transition":"slide"},{"id":"s6","kind":"disclaimer","visual_kind":"disclaimer","purpose":"disclaimer","duration_seconds":8,"transition":"cut"}]
+        for scene in base: scene["duration_seconds"]=round(max(4 if is_disclaimer_scene(scene) else 2,scene["duration_seconds"]*factor),2)
         return {"scenes":base}
 
     def _narration(self,scenes:dict[str,Any])->dict[str,Any]:
         """Generate separate display and normalized spoken text for each scene."""
-        texts=["英伟达最新成绩单来了：AI 热潮，究竟有多强？","Q1 FY2027 收入 $81.6B，同比 +85%，环比 +20%，增长曲线再次变陡。","Data Center 收入 $75.2B，同比 +92%，约占总收入九成二，是最核心的增长引擎。","GAAP 毛利率 74.9%。公司给出的 Q2 FY2027 收入指引是 $91.0B，±2%。","但高增长不等于低风险。本视频仅供信息与产品演示用途，不构成投资建议。"]
-        return {"language":"zh-CN","source":"generated","segments":[{"scene_id":s["id"],"display_text":t,"spoken_text":normalize_spoken(t),"fact_ids":ids} for s,t,ids in zip(scenes["scenes"],texts,[[],["fact.revenue.q1fy27"],["fact.datacenter.q1fy27","fact.revenue.q1fy27"],["fact.grossmargin.q1fy27","fact.guidance.q2fy27"],[]])]}
+        texts=["英伟达最新成绩单来了：这轮人工智能需求，究竟如何反映在财务数据里？","Q1 FY2027 收入 $81.6B，同比 +85%，环比 +20%。连续增长说明算力投资仍在加速兑现。","Data Center 收入 $75.2B，同比 +92%，已经成为最核心的增长引擎，也决定了整体收入弹性。","GAAP 毛利率 74.9%。在收入高速扩张的同时，利润率仍保持高位，是本季质量的重要观察点。","公司给出的 Q2 FY2027 收入指引是 $91.0B，±2%。接下来需要同时关注需求兑现、供应能力和利润率变化。","高增长并不等于低风险。本视频仅供信息与产品演示用途，不构成投资建议。"]
+        refs=[[],["fact.revenue.q1fy27"],["fact.datacenter.q1fy27","fact.revenue.q1fy27"],["fact.grossmargin.q1fy27"],["fact.guidance.q2fy27"],[]]
+        return {"language":"zh-CN","source":"generated","segments":[{"scene_id":s["id"],"display_text":t,"spoken_text":normalize_spoken(t),"fact_ids":ids} for s,t,ids in zip(scenes["scenes"],texts,refs)]}
 
     def _resolve_narration(self,scenes:dict[str,Any],bundle:dict[str,Any]|None)->dict[str,Any]:
-        """Honor transcript mode instead of always replacing a supplied script."""
+        """Honor transcript mode and force the request disclaimer into narration."""
         transcript=self.request.transcript
         if transcript.mode == "generate":
             narration=bundle["narration"] if bundle else self._narration(scenes)
             narration.setdefault("source","generated")
-            return narration
-        if transcript.allow_editing and bundle:
+        elif transcript.allow_editing and bundle:
             narration=bundle["narration"]
             narration["source"]="pre-written"
             narration["editing_applied"]=True
-            return narration
-        return self._pre_written_narration(scenes)
+        else:
+            narration=self._pre_written_narration(scenes)
+        disclaimer_ids={scene["id"] for scene in scenes["scenes"] if is_disclaimer_scene(scene)}
+        disclaimer=self.request.source_materials.disclaimer.strip()
+        replacement={"display_text":disclaimer,"spoken_text":normalize_spoken(disclaimer),"fact_ids":[]}
+        segments=[]; replaced=set()
+        for segment in narration["segments"]:
+            if segment["scene_id"] in disclaimer_ids:
+                segments.append({**segment,**replacement}); replaced.add(segment["scene_id"])
+            else:
+                segments.append(dict(segment))
+        for scene in scenes["scenes"]:
+            if scene["id"] in disclaimer_ids and scene["id"] not in replaced:
+                segments.append({"scene_id":scene["id"],**replacement})
+        return {**narration,"segments":segments}
 
     def _pre_written_narration(self,scenes:dict[str,Any])->dict[str,Any]:
         """Segment a locked user script without rewriting it and add the required disclaimer scene."""
         text=self.request.transcript.text or ""
         sentences=[part for part in re.split(r"(?<=[。！？!?])",text) if part]
         scene_list=scenes["scenes"]
-        content_scenes=[scene for scene in scene_list if scene.get("purpose")!="disclaimer"]
+        content_scenes=[scene for scene in scene_list if not is_disclaimer_scene(scene)]
         segments=[]
         for index,scene in enumerate(content_scenes):
             start=index*len(sentences)//max(1,len(content_scenes)); end=(index+1)*len(sentences)//max(1,len(content_scenes))
             display="".join(sentences[start:end])
             segments.append({"scene_id":scene["id"],"display_text":display,"spoken_text":normalize_spoken(display),"fact_ids":[]})
         for scene in scene_list:
-            if scene.get("purpose")=="disclaimer":
+            if is_disclaimer_scene(scene):
                 display=self.request.source_materials.disclaimer.strip()
                 segments.append({"scene_id":scene["id"],"display_text":display,"spoken_text":normalize_spoken(display),"fact_ids":[]})
         return {"language":self.request.transcript.language,"source":"pre-written","editing_applied":False,"segments":segments}
@@ -238,14 +393,17 @@ class Pipeline:
     def _charts(self)->dict[str,Any]:
         """Declare chart data, animations, labels and subtitle-safe regions."""
         safe={"x":96,"y":756,"width":1728,"height":216}
-        return {"reserved_regions":{"captions":safe},"charts":[{"id":"revenue-bars","type":"bar","labels":["Q1 FY26","Q4 FY26","Q1 FY27"],"values":[44.062,68.127,81.615],"unit":"USD billions","fact_ids":["fact.revenue.q1fy26","fact.revenue.q4fy26","fact.revenue.q1fy27"],"animation":"grow"},{"id":"mix-donut","type":"donut","values":[75.2,6.415],"labels":["Data Center","其他"],"fact_ids":["fact.datacenter.q1fy27","fact.revenue.q1fy27"],"animation":"sweep"},{"id":"guidance-range","type":"range","midpoint":91,"low":89.18,"high":92.82,"unit":"USD billions","fact_ids":["fact.guidance.q2fy27"],"key_levels":[{"kind":"guidance_low","value":89.18},{"kind":"guidance_mid","value":91},{"kind":"guidance_high","value":92.82}],"animation":"pan-and-highlight"}]}
+        return {"reserved_regions":{"captions":safe},"charts":[{"id":"revenue-bars","type":"bar","labels":["Q1 FY26","Q4 FY26","Q1 FY27"],"values":[44.062,68.127,81.615],"unit":"USD billions","fact_ids":["fact.revenue.q1fy26","fact.revenue.q4fy26","fact.revenue.q1fy27"],"animation":"grow"},{"id":"mix-donut","type":"donut","values":[75.2,6.415],"labels":["Data Center","其他"],"fact_ids":["fact.datacenter.q1fy27","fact.revenue.q1fy27"],"animation":"sweep"},{"id":"margin-line","type":"line","title":"GAAP 毛利率","labels":["Q1 FY27"],"values":[74.9],"unit":"percent","fact_ids":["fact.grossmargin.q1fy27"],"animation":"draw-and-highlight"},{"id":"guidance-cards","type":"metric_cards","title":"下一季度指引","labels":["中点","低值","高值"],"values":[91,89.18,92.82],"unit":"USD billions","fact_ids":["fact.guidance.q2fy27"],"key_levels":[],"animation":"grow"}]}
 
     def _tts_alignment(self,narration:dict[str,Any])->dict[str,Any]:
         """Produce deterministic phrase timestamps; a real adapter replaces these with ElevenLabs timestamps."""
-        cursor=0.0; phrases=[]
-        for seg in narration["segments"]:
-            duration=max(4.0,len(seg["spoken_text"])/5.2); phrases.append({"scene_id":seg["scene_id"],"start_seconds":round(cursor,3),"end_seconds":round(cursor+duration,3),"display_text":seg["display_text"],"spoken_text":seg["spoken_text"]}); cursor+=duration
-        return {"provider":"deterministic-timestamp-adapter","phrases":phrases,"duration_seconds":round(cursor,3)}
+        _,spans=self._tts_script(narration); cursor=0.0; cues=[]
+        for span in spans:
+            duration=max(.35,len(span["spoken_text"])/4.2); cues.append({"scene_id":span["scene_id"],"text":span["text"],"spoken_text":span["spoken_text"],"start_seconds":round(cursor,3),"end_seconds":round(cursor+duration,3)}); cursor+=duration
+        phrases=[]
+        for scene_id in dict.fromkeys(c["scene_id"] for c in cues):
+            group=[c for c in cues if c["scene_id"]==scene_id]; phrases.append({"scene_id":scene_id,"start_seconds":group[0]["start_seconds"],"end_seconds":group[-1]["end_seconds"],"display_text":"".join(c["text"] for c in group),"spoken_text":"".join(c["spoken_text"] for c in group)})
+        return {"provider":"deterministic-timestamp-adapter","phrases":phrases,"caption_cues":cues,"duration_seconds":round(cursor,3)}
 
     def _tts_audio(self,narration:dict[str,Any])->dict[str,Any]:
         """Render a zero-key Mandarin voice track with macOS say, or document the production adapter requirement."""
@@ -261,11 +419,26 @@ class Pipeline:
         raise RuntimeError("Deterministic narration requires macOS say and afconvert; use production ElevenLabs on other platforms")
 
     def _timeline(self,scenes:dict[str,Any],alignment:dict[str,Any])->dict[str,Any]:
-        """Compile allowed transitions and animation events to frame boundaries."""
-        fps=self.request.output.fps; events=[]; frame=0
-        for scene in scenes["scenes"]:
-            selected=scene.get("transition","cut"); transition=selected if selected in TRANSITIONS else "cut"; phrase=next((p for p in alignment.get("phrases",[]) if p["scene_id"]==scene["id"]),None); phrase_duration=(phrase["end_seconds"]-phrase["start_seconds"]+1.0) if phrase else 0; duration=max(float(scene["duration_seconds"]),phrase_duration); scene["duration_seconds"]=round(duration,3); frames=round(duration*fps); events.append({"scene_id":scene["id"],"from_frame":frame,"to_frame":frame+frames-1,"transition":{"template":transition,"duration_frames":min(round(.6*fps),frames//4)},"caption":phrase}); frame+=frames
-        return {"fps":fps,"total_frames":frame,"allowed_transition_templates":sorted(TRANSITIONS),"events":events}
+        """Compile a single global timeline from actual audio cue boundaries."""
+        fps=self.request.output.fps; cues=alignment.get("caption_cues",[]); phrases={p["scene_id"]:p for p in alignment.get("phrases",[])}; scene_list=scenes["scenes"]
+        boundaries=[0.0]
+        for index in range(1,len(scene_list)):
+            previous=phrases.get(scene_list[index-1]["id"]); current=phrases.get(scene_list[index]["id"])
+            if previous and current: boundary=max(previous["end_seconds"],(previous["end_seconds"]+current["start_seconds"])/2)
+            elif current: boundary=max(boundaries[-1],current["start_seconds"]-.2)
+            else: boundary=boundaries[-1]
+            boundaries.append(boundary)
+        last_phrase=phrases.get(scene_list[-1]["id"]); audio_end=float(alignment.get("duration_seconds",0)); final_end=max(audio_end+.35,(last_phrase or {}).get("end_seconds",audio_end)+.35)
+        if is_disclaimer_scene(scene_list[-1]): final_end=max(final_end,boundaries[-1]+4)
+        boundaries.append(final_end); events=[]
+        for index,scene in enumerate(scene_list):
+            start_frame=round(boundaries[index]*fps); end_frame=max(start_frame,round(boundaries[index+1]*fps)-1); scene["duration_seconds"]=round((end_frame-start_frame+1)/fps,3)
+            selected=scene.get("transition","cut"); transition=selected if selected in TRANSITIONS else "cut"
+            events.append({"scene_id":scene["id"],"visual_kind":scene.get("visual_kind","broll"),"from_frame":start_frame,"to_frame":end_frame,"start_seconds":round(start_frame/fps,3),"end_seconds":round((end_frame+1)/fps,3),"transition":{"template":transition,"duration_frames":min(round(.6*fps),max(1,(end_frame-start_frame+1)//4))}})
+        framed=[]
+        for cue in cues:
+            framed.append({**cue,"from_frame":round(cue["start_seconds"]*fps),"to_frame":max(round(cue["start_seconds"]*fps),round(cue["end_seconds"]*fps)-1)})
+        return {"fps":fps,"total_frames":events[-1]["to_frame"]+1 if events else 0,"audio_duration_seconds":audio_end,"video_duration_seconds":round((events[-1]["to_frame"]+1)/fps,3) if events else 0,"allowed_transition_templates":sorted(TRANSITIONS),"caption_cues":framed,"events":events}
 
     def _assets(self,scenes:dict[str,Any])->dict[str,Any]:
         """Resolve one locked reference then apply the documented fallback ladder per scene."""
@@ -273,7 +446,8 @@ class Pipeline:
         for scene in scenes["scenes"]:
             subject=scene.get("asset_subject")
             if subject and subject not in refs: refs[subject]={"reference_id":f"ref-{content_hash(subject)[:10]}","style_lock_id":"cartoon-v1","prompt_version":"1"}
-            resolved.append({"scene_id":scene["id"],"strategy":"icon_illustration_gradient","attempts":[{"strategy":"bach_video","status":"skipped_no_key"},{"strategy":"bach_image_camera_motion","status":"skipped_no_key"},{"strategy":"icon_illustration_gradient","status":"succeeded"}],"reference_id":refs.get(subject,{}).get("reference_id")})
+            kind=scene.get("visual_kind","broll"); reason=f"{kind}_uses_deterministic_template" if kind!="broll" else "deterministic_mode"
+            resolved.append({"scene_id":scene["id"],"strategy":"icon_illustration_gradient","attempts":[{"strategy":"icon_illustration_gradient","status":"succeeded","reason":reason}],"reference_id":refs.get(subject,{}).get("reference_id")})
         return {"reference_registry":refs,"scenes":resolved}
 
     def _production_assets(self,scenes:dict[str,Any])->dict[str,Any]:
@@ -284,6 +458,8 @@ class Pipeline:
             refs.update(json.loads(existing_assets.read_text()).get("reference_registry",{}))
         subject_counts={}
         for scene in scenes["scenes"]:
+            if is_disclaimer_scene(scene) or scene.get("visual_kind","broll")!="broll":
+                resolved.append({"scene_id":scene["id"],"strategy":"data_visual_template" if scene.get("visual_kind") in {"chart","metric_cards"} else "disclaimer_template","attempts":[{"strategy":"deterministic_template","status":"succeeded","reason":f"visual_kind_{scene.get('visual_kind')}"}],"reference_id":None}); continue
             subject=scene.get("asset_subject") or scene.get("subject_id")
             if subject: subject_counts[subject]=subject_counts.get(subject,0)+1
         for subject,count in subject_counts.items():
@@ -296,16 +472,17 @@ class Pipeline:
             except Exception as error:
                 refs[subject]={"reference_id":reference_id,"style_lock_id":"production-cartoon-v1","prompt_version":"1","status":"fallback","reason":str(error)}
         for scene in scenes["scenes"]:
+            if is_disclaimer_scene(scene) or scene.get("visual_kind","broll")!="broll": continue
             subject=scene.get("asset_subject") or scene.get("subject_id")
             prompt=scene.get("visual_prompt") or f"Cartoon-style financial explainer B-roll: {scene.get('purpose','financial scene')}, clean blue and green palette, smooth camera motion"; attempts=[]
-            if scene.get("purpose","").lower()=="disclaimer":
-                resolved.append({"scene_id":scene["id"],"strategy":"icon_illustration_gradient","attempts":[{"strategy":"icon_illustration_gradient","status":"succeeded","reason":"disclaimer_uses_deterministic_template"}],"reference_id":None}); continue
             try:
                 reference=refs.get(subject,{}).get("reference_input")
                 if reference:
-                    result,meta=adapter.elements_to_video(prompt,[reference]); strategy="bach_elements_to_video"
+                    duration=max(6,min(10,round(float(scene.get("duration_seconds",6)))))
+                    result,meta=adapter.elements_to_video(prompt,[reference],duration); strategy="bach_elements_to_video"
                 else:
-                    result,meta=adapter.text_to_video(prompt); strategy="bach_text_to_video"
+                    duration=max(6,min(10,round(float(scene.get("duration_seconds",6)))))
+                    result,meta=adapter.text_to_video(prompt,duration); strategy="bach_text_to_video"
                 usage["api_calls"]+=meta["api_calls"]; usage["cost_usd"]+=meta.get("cost_usd",0); attempts.append({"strategy":strategy,"status":"succeeded","result":result,"metrics":meta})
             except Exception as video_error:
                 attempted_strategy="bach_elements_to_video" if refs.get(subject,{}).get("reference_input") else "bach_text_to_video"; attempts.append({"strategy":attempted_strategy,"status":"failed","reason":str(video_error)}); usage["retries"]+=1
@@ -321,7 +498,8 @@ class Pipeline:
         scenes,narration,charts,timeline,assets=parts
         tts=json.loads((self.run_dir/"tts.json").read_text())
         width,height=(int(v) for v in self.request.output.resolution.split("x")); caption_height=round(height*.2); margin=round(width*.05)
-        return {"schema_version":"1.1","composition_id":"FinancialVideo","output":{"width":width,"height":height,"fps":self.request.output.fps,"codec":"h264"},"scenes":scenes["scenes"],"narration":narration,"audio":{"src":tts.get("remotion_static_src")},"charts":charts,"timeline":timeline,"assets":assets,"captions":{**self.request.captions.model_dump(mode="json"),"safe_zone":{"top":height-caption_height-round(height*.1),"bottom":height-round(height*.1),"left":margin,"right":width-margin}},"brand":self.request.brand.model_dump(mode="json"),"disclaimer":self.request.source_materials.disclaimer}
+        summary=visual_summary(scenes,narration)
+        return {"schema_version":"2.0","composition_id":"FinancialVideo","output":{"width":width,"height":height,"fps":self.request.output.fps,"codec":"h264"},"scenes":scenes["scenes"],"narration":narration,"audio":{"src":tts.get("remotion_static_src"),"duration_seconds":timeline.get("audio_duration_seconds"),"voice_settings":tts.get("voice_settings",{})},"charts":charts,"timeline":timeline,"caption_cues":timeline.get("caption_cues",[]),"assets":assets,"visual_summary":summary,"captions":{**self.request.captions.model_dump(mode="json"),"safe_zone":{"top":height-caption_height-round(height*.1),"bottom":height-round(height*.1),"left":margin,"right":width-margin}},"brand":self.request.brand.model_dump(mode="json"),"disclaimer":self.request.source_materials.disclaimer}
 
     def _render(self)->None:
         """Invoke Remotion; emit a clear placeholder only when dependencies are unavailable."""
@@ -336,8 +514,15 @@ class Pipeline:
         """Run deterministic consistency, timeline, safe-zone and disclaimer checks."""
         width,height=manifest["output"]["width"],manifest["output"]["height"]; safe=manifest["captions"]["safe_zone"]
         audio_src=manifest.get("audio",{}).get("src"); audio_path=ROOT/"public"/audio_src if audio_src else None
-        checks=[{"id":"facts_traceable","passed":all(isinstance(seg.get("fact_ids"),list) for seg in manifest["narration"]["segments"])},{"id":"transitions_template_bound","passed":all(e["transition"]["template"] in TRANSITIONS for e in manifest["timeline"]["events"])},{"id":"timeline_valid","passed":all(e["to_frame"]>=e["from_frame"] for e in manifest["timeline"]["events"])},{"id":"caption_safe_zone","passed":0<=safe["left"]<safe["right"]<=width and 0<=safe["top"]<safe["bottom"]<=height},{"id":"captions_nonempty","passed":not manifest["captions"]["enabled"] or all(bool(s["display_text"].strip()) for s in manifest["narration"]["segments"])},{"id":"audio_exists","passed":bool(audio_path and audio_path.exists() and audio_path.stat().st_size>0)},{"id":"disclaimer_present","passed":bool(manifest["disclaimer"].strip())},{"id":"disclaimer_duration","passed":manifest["scenes"][-1]["purpose"].lower()=="disclaimer" and manifest["scenes"][-1]["duration_seconds"]>=4},{"id":"video_exists","passed":(self.run_dir/"final.mp4").exists() and (self.run_dir/"final.mp4").stat().st_size>1024}]
-        report={"passed":all(c["passed"] for c in checks),"checks":checks,"manual_review":{"required":True,"keyframes_seconds":[max(0,e["from_frame"]/manifest["output"]["fps"]+.5) for e in manifest["timeline"]["events"]]}}
+        cues=manifest.get("caption_cues",[]); events={e["scene_id"]:e for e in manifest["timeline"]["events"]}; summary=manifest["visual_summary"]
+        monotonic=all(cues[i]["start_seconds"]>=cues[i-1]["end_seconds"]-1e-3 for i in range(1,len(cues)))
+        within=all(c["scene_id"] in events and c["from_frame"]>=events[c["scene_id"]]["from_frame"] and c["to_frame"]<=events[c["scene_id"]]["to_frame"] for c in cues)
+        narration_covered=all(segment["scene_id"] in {c["scene_id"] for c in cues} for segment in manifest["narration"]["segments"])
+        chart_by_id={c["id"]:c for c in manifest["charts"]["charts"]}; data_refs=all(bool(chart_by_id.get(scene.get("chart"),{}).get("fact_ids")) for scene in manifest["scenes"] if scene.get("visual_kind") in {"chart","metric_cards"})
+        audio_duration=float(manifest["audio"].get("duration_seconds") or 0); last_cue=cues[-1]["end_seconds"] if cues else 0
+        checks=[{"id":"facts_traceable","passed":all(isinstance(seg.get("fact_ids"),list) for seg in manifest["narration"]["segments"])},{"id":"data_values_traceable","passed":data_refs},{"id":"transitions_template_bound","passed":all(e["transition"]["template"] in TRANSITIONS for e in events.values())},{"id":"timeline_valid","passed":all(e["to_frame"]>=e["from_frame"] for e in events.values())},{"id":"audio_content_sync","passed":abs(audio_duration-last_cue)<=.5},{"id":"caption_cues_monotonic","passed":monotonic},{"id":"caption_cues_within_scenes","passed":within},{"id":"narration_caption_coverage","passed":narration_covered},{"id":"caption_safe_zone","passed":0<=safe["left"]<safe["right"]<=width and 0<=safe["top"]<safe["bottom"]<=height},{"id":"audio_exists","passed":bool(audio_path and audio_path.exists() and audio_path.stat().st_size>0)},{"id":"data_visual_coverage","passed":summary["data_visual_coverage"]>=.8},{"id":"chart_scene_count","passed":summary["chart_count"]>=2},{"id":"metric_card_scene_count","passed":summary["metric_card_count"]>=1},{"id":"broll_share","passed":summary["broll_count"]<=math.floor(summary["content_scene_count"]*.2)},{"id":"disclaimer_present","passed":bool(manifest["disclaimer"].strip())},{"id":"disclaimer_duration","passed":is_disclaimer_scene(manifest["scenes"][-1]) and manifest["scenes"][-1]["duration_seconds"]>=4},{"id":"video_exists","passed":(self.run_dir/"final.mp4").exists() and (self.run_dir/"final.mp4").stat().st_size>1024}]
+        spoken_chars=sum(len(s["spoken_text"]) for s in manifest["narration"]["segments"]); cue_chars=sum(len(c["spoken_text"]) for c in cues)
+        report={"passed":all(c["passed"] for c in checks),"checks":checks,"metrics":{"audio_duration_seconds":audio_duration,"video_duration_seconds":manifest["timeline"]["video_duration_seconds"],"caption_coverage":round(cue_chars/max(1,spoken_chars),3),**summary},"manual_review":{"required":True,"keyframes_seconds":[max(0,e["from_frame"]/manifest["output"]["fps"]+.5) for e in events.values()]}}
         self._node("qa_report",report)
         if not report["passed"]: raise RuntimeError("QA failed: "+", ".join(c["id"] for c in checks if not c["passed"]))
 
